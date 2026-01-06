@@ -210,38 +210,65 @@ function LiveRecording({ config, speakers, activeSpeakers, setActiveSpeakers, on
       
       console.log('Using MIME type:', selectedMimeType || 'default')
       
-      const mediaRecorder = new MediaRecorder(stream, selectedMimeType ? { mimeType: selectedMimeType } : {})
+      // Use stop/start approach to get complete webm files with headers
+      let currentRecorder = null
+      let isRecordingActive = true
       
-      // Collect chunks and send every 3 seconds
-      let chunks = []
-      
-      mediaRecorder.ondataavailable = async (event) => {
-        if (event.data.size > 0) {
-          chunks.push(event.data)
-        }
-      }
-      
-      // Send audio every 3 seconds
-      const sendInterval = setInterval(async () => {
-        if (chunks.length > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
-          const blob = new Blob(chunks, { type: selectedMimeType || 'audio/webm' })
-          chunks = []
-          
-          // Send raw audio bytes - backend handles conversion via ffmpeg
-          try {
-            const arrayBuffer = await blob.arrayBuffer()
-            wsRef.current.send(arrayBuffer)
-            console.log(`Sent ${arrayBuffer.byteLength} bytes of audio`)
-          } catch (err) {
-            console.error('Error sending audio:', err)
+      const startNewRecording = () => {
+        if (!isRecordingActive || !streamRef.current) return
+        
+        const recorder = new MediaRecorder(streamRef.current, selectedMimeType ? { mimeType: selectedMimeType } : {})
+        const chunks = []
+        
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            chunks.push(event.data)
           }
         }
-      }, 3000)
+        
+        recorder.onstop = async () => {
+          if (chunks.length > 0 && wsRef.current?.readyState === WebSocket.OPEN) {
+            // Create complete webm file with all headers
+            const blob = new Blob(chunks, { type: selectedMimeType || 'audio/webm' })
+            try {
+              const arrayBuffer = await blob.arrayBuffer()
+              wsRef.current.send(arrayBuffer)
+              console.log(`Sent ${arrayBuffer.byteLength} bytes of complete audio`)
+            } catch (err) {
+              console.error('Error sending audio:', err)
+            }
+          }
+          
+          // Start next recording if still active
+          if (isRecordingActive) {
+            startNewRecording()
+          }
+        }
+        
+        recorder.start()
+        currentRecorder = recorder
+        
+        // Stop after 3 seconds to create complete file
+        setTimeout(() => {
+          if (recorder.state === 'recording') {
+            recorder.stop()
+          }
+        }, 3000)
+      }
       
-      mediaRecorder.start(1000) // Collect data every second
+      // Start first recording
+      startNewRecording()
       
       // Store for cleanup
-      mediaRecorderRef.current = { mediaRecorder, sendInterval, source }
+      mediaRecorderRef.current = { 
+        stop: () => {
+          isRecordingActive = false
+          if (currentRecorder?.state === 'recording') {
+            currentRecorder.stop()
+          }
+        },
+        source 
+      }
       
       setIsRecording(true)
     } catch (err) {
@@ -252,11 +279,8 @@ function LiveRecording({ config, speakers, activeSpeakers, setActiveSpeakers, on
 
   const stopRecording = () => {
     // Stop MediaRecorder
-    if (mediaRecorderRef.current?.mediaRecorder) {
-      mediaRecorderRef.current.mediaRecorder.stop()
-    }
-    if (mediaRecorderRef.current?.sendInterval) {
-      clearInterval(mediaRecorderRef.current.sendInterval)
+    if (mediaRecorderRef.current?.stop) {
+      mediaRecorderRef.current.stop()
     }
     if (mediaRecorderRef.current?.source) {
       mediaRecorderRef.current.source.disconnect()
