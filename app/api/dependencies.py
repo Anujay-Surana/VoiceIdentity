@@ -61,10 +61,14 @@ async def get_user_context(
 
 
 def get_diarization_pipeline(request: Request) -> DiarizationPipeline:
-    """Get the diarization pipeline from app state."""
-    return request.app.state.diarization_pipeline
+    """Get the diarization pipeline (lazy loaded)."""
+    from app.main import get_ml_models
+    diarization, _ = get_ml_models()
+    return diarization
 
 
 def get_embedding_extractor(request: Request) -> EmbeddingExtractor:
-    """Get the embedding extractor from app state."""
-    return request.app.state.embedding_extractor
+    """Get the embedding extractor (lazy loaded)."""
+    from app.main import get_ml_models
+    _, embeddings = get_ml_models()
+    return embeddings

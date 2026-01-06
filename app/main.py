@@ -1,37 +1,40 @@
 """FastAPI application entry point."""
 
-from contextlib import asynccontextmanager
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.api.routes import audio, speakers, conversations, streaming
-from app.core.diarization import DiarizationPipeline
-from app.core.embeddings import EmbeddingExtractor
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Initialize ML models on startup."""
-    settings = get_settings()
-    
-    # Initialize ML pipelines (loaded once, reused for all requests)
-    app.state.diarization_pipeline = DiarizationPipeline(hf_token=settings.hf_token)
-    app.state.embedding_extractor = EmbeddingExtractor()
-    
-    yield
-    
-    # Cleanup on shutdown
-    del app.state.diarization_pipeline
-    del app.state.embedding_extractor
-
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Voice Identity Platform",
     description="Speaker identification and diarization service",
     version="1.0.0",
-    lifespan=lifespan,
 )
+
+# ML models loaded lazily on first request
+app.state.diarization_pipeline = None
+app.state.embedding_extractor = None
+app.state.models_loaded = False
+
+
+def get_ml_models():
+    """Lazy load ML models on first use."""
+    if not app.state.models_loaded:
+        logger.info("Loading ML models (first request)...")
+        from app.core.diarization import DiarizationPipeline
+        from app.core.embeddings import EmbeddingExtractor
+        settings = get_settings()
+        
+        app.state.diarization_pipeline = DiarizationPipeline(hf_token=settings.hf_token)
+        app.state.embedding_extractor = EmbeddingExtractor()
+        app.state.models_loaded = True
+        logger.info("ML models loaded successfully!")
+    
+    return app.state.diarization_pipeline, app.state.embedding_extractor
 
 # CORS middleware
 app.add_middleware(
@@ -58,7 +61,10 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "models_loaded": app.state.models_loaded,
+    }
 
 
 if __name__ == "__main__":

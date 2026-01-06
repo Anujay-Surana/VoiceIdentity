@@ -488,9 +488,9 @@ async def websocket_stream(
     
     await websocket.accept()
     
-    # Initialize ML pipelines
-    diarization_pipeline = DiarizationPipeline(hf_token=settings.hf_token)
-    embedding_extractor = EmbeddingExtractor()
+    # Get shared ML pipelines (lazy loaded on first use)
+    from app.main import get_ml_models
+    diarization_pipeline, embedding_extractor = get_ml_models()
     
     # Initialize transcription service if enabled
     transcription_service = None
