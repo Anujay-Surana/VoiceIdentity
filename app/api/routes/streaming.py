@@ -122,15 +122,19 @@ class StreamingSession:
         
         Returns list of identified speaker segments.
         """
+        logger.info(f"[CHUNK] Processing {len(audio_bytes)} bytes...")
+        
         # Load and add to buffer
         try:
             audio, sr = load_audio_from_bytes(audio_bytes, target_sr=self.settings.sample_rate)
+            logger.info(f"[CHUNK] Loaded audio: {len(audio)} samples, {len(audio)/sr:.2f}s, sr={sr}")
         except Exception as e:
-            print(f"Warning: Could not load audio chunk: {e}")
+            logger.warning(f"[CHUNK] Could not load audio: {e}")
             return []  # Skip this chunk gracefully
         
         # Skip if audio is too short or empty
         if len(audio) < 100:
+            logger.warning(f"[CHUNK] Audio too short: {len(audio)} samples")
             return []
             
         self.audio_buffer.append(audio)
@@ -549,13 +553,19 @@ async def websocket_stream(
             elif "bytes" in message:
                 # Audio chunk
                 audio_bytes = message["bytes"]
-                results = await session.process_chunk(audio_bytes)
+                logger.info(f"[STREAM] Received audio chunk: {len(audio_bytes)} bytes")
                 
-                if results:
-                    await websocket.send_json({
-                        "type": "identification",
-                        "segments": results,
-                    })
+                try:
+                    results = await session.process_chunk(audio_bytes)
+                    logger.info(f"[STREAM] Processed chunk, got {len(results)} results")
+                    
+                    if results:
+                        await websocket.send_json({
+                            "type": "identification",
+                            "segments": results,
+                        })
+                except Exception as e:
+                    logger.error(f"[STREAM] Error processing chunk: {e}")
     
     except WebSocketDisconnect:
         # Clean up on disconnect
