@@ -227,22 +227,13 @@ function LiveRecording({ config, speakers, activeSpeakers, setActiveSpeakers, on
           const blob = new Blob(chunks, { type: selectedMimeType || 'audio/webm' })
           chunks = []
           
-          // Convert to WAV for the backend
+          // Send raw audio bytes - backend handles conversion via ffmpeg
           try {
             const arrayBuffer = await blob.arrayBuffer()
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)()
-            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
-            
-            // Convert to WAV
-            const wavBuffer = encodeWAV([audioBuffer.getChannelData(0)], audioBuffer.sampleRate)
-            wsRef.current.send(wavBuffer)
-            
-            audioContext.close()
-          } catch (err) {
-            console.error('Error converting audio:', err)
-            // Try sending raw blob as fallback
-            const arrayBuffer = await blob.arrayBuffer()
             wsRef.current.send(arrayBuffer)
+            console.log(`Sent ${arrayBuffer.byteLength} bytes of audio`)
+          } catch (err) {
+            console.error('Error sending audio:', err)
           }
         }
       }, 3000)

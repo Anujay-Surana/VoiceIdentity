@@ -3,17 +3,16 @@
 import io
 import tempfile
 import os
+import subprocess
 import numpy as np
 import librosa
 import soundfile as sf
-import torch
-import torchaudio
 
 
 def load_audio_from_bytes(audio_bytes: bytes, target_sr: int = 16000) -> tuple[np.ndarray, int]:
     """
     Load audio from bytes and resample to target sample rate.
-    Supports WAV, MP3, WebM/Opus, and other formats.
+    Supports WAV, MP3, WebM/Opus, and other formats via ffmpeg.
     
     Returns:
         tuple: (audio_array, sample_rate)
@@ -23,22 +22,11 @@ def load_audio_from_bytes(audio_bytes: bytes, target_sr: int = 16000) -> tuple[n
         audio, sr = sf.read(io.BytesIO(audio_bytes))
         audio = audio.astype(np.float32)
     except Exception:
-        # Fall back to torchaudio for WebM/Opus and other formats
+        # Fall back to ffmpeg for WebM/Opus and other formats
         try:
-            audio, sr = _load_with_torchaudio(audio_bytes)
+            audio, sr = _load_with_ffmpeg(audio_bytes, target_sr)
         except Exception as e:
-            # Last resort: try with pydub if ffmpeg is available
-            try:
-                from pydub import AudioSegment
-                audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
-                audio = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
-                audio = audio / (2**15)  # Normalize to [-1, 1]
-                sr = audio_segment.frame_rate
-                
-                if audio_segment.channels == 2:
-                    audio = audio.reshape(-1, 2).mean(axis=1)
-            except Exception:
-                raise ValueError(f"Could not load audio: {e}")
+            raise ValueError(f"Could not load audio: {e}")
     
     # Ensure mono
     if len(audio.shape) > 1:
@@ -52,33 +40,44 @@ def load_audio_from_bytes(audio_bytes: bytes, target_sr: int = 16000) -> tuple[n
     return audio.astype(np.float32), sr
 
 
-def _load_with_torchaudio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
+def _load_with_ffmpeg(audio_bytes: bytes, target_sr: int = 16000) -> tuple[np.ndarray, int]:
     """
-    Load audio using torchaudio via a temporary file.
-    This handles WebM/Opus and other formats that need file access.
+    Load audio using ffmpeg subprocess.
+    This handles WebM/Opus, MP4, and other formats reliably.
     """
-    # Write to temp file (torchaudio needs file path for some formats)
-    with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as f:
-        f.write(audio_bytes)
-        temp_path = f.name
+    # Write input to temp file
+    with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as f_in:
+        f_in.write(audio_bytes)
+        input_path = f_in.name
+    
+    # Output to temp WAV file
+    output_path = input_path.replace('.webm', '.wav')
     
     try:
-        # Load with torchaudio
-        waveform, sr = torchaudio.load(temp_path)
+        # Use ffmpeg to convert to WAV
+        result = subprocess.run([
+            'ffmpeg', '-y',
+            '-i', input_path,
+            '-ar', str(target_sr),  # Resample to target
+            '-ac', '1',  # Mono
+            '-f', 'wav',
+            output_path
+        ], capture_output=True, timeout=30)
         
-        # Convert to numpy
-        audio = waveform.numpy()
+        if result.returncode != 0:
+            stderr = result.stderr.decode('utf-8', errors='ignore')
+            raise ValueError(f"ffmpeg error: {stderr[:200]}")
         
-        # Convert to mono if stereo
-        if audio.shape[0] > 1:
-            audio = audio.mean(axis=0)
-        else:
-            audio = audio.squeeze(0)
-        
+        # Read the converted WAV
+        audio, sr = sf.read(output_path)
         return audio.astype(np.float32), sr
+        
     finally:
-        # Clean up temp file
-        os.unlink(temp_path)
+        # Clean up temp files
+        if os.path.exists(input_path):
+            os.unlink(input_path)
+        if os.path.exists(output_path):
+            os.unlink(output_path)
 
 
 def extract_segment(
