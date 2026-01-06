@@ -38,7 +38,7 @@ class EmbeddingExtractor:
     def __init__(
         self,
         device: Optional[str] = None,
-        savedir: str = "pretrained_models/spkrec-ecapa-voxceleb",
+        savedir: str = "/app/pretrained_models/spkrec-ecapa-voxceleb",
     ):
         """
         Initialize the embedding extractor.

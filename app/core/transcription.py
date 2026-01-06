@@ -23,6 +23,7 @@ class TranscriptionService:
         self,
         model_size: str = "base",  # Options: tiny, base, small, medium, large
         device: str = "auto",  # auto, cpu, cuda
+        download_root: str = "/app/.cache/whisper",  # Cache location for Docker
     ):
         """
         Initialize the transcription service.
@@ -30,16 +31,28 @@ class TranscriptionService:
         Args:
             model_size: Whisper model size (base is good balance of speed/accuracy)
             device: Device to run on (auto-detects GPU if available)
+            download_root: Directory to cache Whisper models
         """
         import whisper
+        import os
         
         logger.info(f"[TRANSCRIBE] Loading Whisper model: {model_size}")
+        
+        # Use download_root if it exists, otherwise fall back to default
+        if os.path.exists(download_root):
+            self._download_root = download_root
+        else:
+            self._download_root = None
         
         # Determine device
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        self.model = whisper.load_model(model_size, device=device)
+        # Load model with explicit cache path if available
+        if self._download_root:
+            self.model = whisper.load_model(model_size, device=device, download_root=self._download_root)
+        else:
+            self.model = whisper.load_model(model_size, device=device)
         self.device = device
         logger.info(f"[TRANSCRIBE] Model loaded on {device}")
     
