@@ -1,8 +1,14 @@
-"""Voice matching using pgvector similarity search."""
+"""Voice matching using pgvector similarity search.
+
+Enhanced features:
+- Centroid-based matching for more robust speaker identification
+- Adaptive thresholds based on audio quality
+- Multi-embedding aggregation
+"""
 
 import numpy as np
 import logging
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 from collections import defaultdict
 from supabase import Client
 
@@ -492,6 +498,234 @@ class VoiceMatcher:
             Similarity score (0-1)
         """
         return float(np.dot(embedding1, embedding2))
+    
+    async def match_with_centroids(
+        self,
+        embedding: np.ndarray,
+        user_id: str,
+        threshold: Optional[float] = None,
+        quality_score: Optional[float] = None,
+        use_adaptive_threshold: bool = True,
+    ) -> VoiceMatchResult:
+        """
+        Match embedding against speaker centroids for more robust matching.
+        
+        Centroids are the average of all embeddings for a speaker, providing
+        a more stable representation than individual embeddings.
+        
+        Args:
+            embedding: Voice embedding to match.
+            user_id: User ID to search within.
+            threshold: Override similarity threshold.
+            quality_score: Audio quality score for adaptive thresholds.
+            use_adaptive_threshold: Whether to adjust threshold based on quality.
+            
+        Returns:
+            VoiceMatchResult with match status and speaker info.
+        """
+        base_threshold = threshold or self.threshold
+        
+        # Apply adaptive threshold if quality score provided
+        if use_adaptive_threshold and quality_score is not None:
+            effective_threshold = self._get_adaptive_threshold(quality_score, base_threshold)
+            logger.info(f"[CENTROID-MATCH] Adaptive threshold: {effective_threshold:.3f} (quality={quality_score:.2f})")
+        else:
+            effective_threshold = base_threshold
+        
+        # Get all speaker IDs for this user
+        speakers_result = self.supabase.table("speakers").select(
+            "id, name"
+        ).eq("user_id", user_id).execute()
+        
+        if not speakers_result.data:
+            logger.info(f"[CENTROID-MATCH] No speakers found for user {user_id[:8]}...")
+            return VoiceMatchResult(is_match=False, speaker_id=None, confidence=0.0)
+        
+        # Compute similarity against each speaker's centroid
+        speaker_scores: List[Tuple[str, str, float]] = []
+        
+        for speaker in speakers_result.data:
+            speaker_id = speaker["id"]
+            speaker_name = speaker.get("name", "Unknown")
+            
+            # Get centroid from database
+            centroid = await self.get_speaker_centroid(speaker_id)
+            
+            if centroid is None or len(centroid) == 0:
+                continue
+            
+            # Compute similarity
+            similarity = float(np.dot(embedding, centroid))
+            speaker_scores.append((speaker_id, speaker_name, similarity))
+            
+            logger.debug(f"[CENTROID-MATCH] Speaker {speaker_name}: sim={similarity:.4f}")
+        
+        if not speaker_scores:
+            logger.info("[CENTROID-MATCH] No speakers with embeddings found")
+            return VoiceMatchResult(is_match=False, speaker_id=None, confidence=0.0)
+        
+        # Sort by similarity
+        speaker_scores.sort(key=lambda x: x[2], reverse=True)
+        
+        # Log top matches
+        logger.info(f"[CENTROID-MATCH] Top matches:")
+        for sid, name, sim in speaker_scores[:5]:
+            logger.info(f"  - {name}: {sim:.4f}")
+        
+        # Check if best match exceeds threshold
+        best_id, best_name, best_sim = speaker_scores[0]
+        
+        if best_sim >= effective_threshold:
+            logger.info(f"[CENTROID-MATCH] MATCHED {best_name} with sim={best_sim:.4f}")
+            return VoiceMatchResult(
+                is_match=True,
+                speaker_id=best_id,
+                confidence=best_sim,
+            )
+        
+        logger.info(f"[CENTROID-MATCH] No match (best={best_sim:.4f} < threshold={effective_threshold:.4f})")
+        return VoiceMatchResult(
+            is_match=False,
+            speaker_id=None,
+            confidence=best_sim,
+        )
+    
+    async def match_hybrid(
+        self,
+        embedding: np.ndarray,
+        user_id: str,
+        threshold: Optional[float] = None,
+        quality_score: Optional[float] = None,
+    ) -> VoiceMatchResult:
+        """
+        Hybrid matching combining centroid and individual embedding matching.
+        
+        This provides the best of both worlds:
+        - Centroid matching for stability
+        - Individual embedding matching for detecting variations
+        
+        Args:
+            embedding: Voice embedding to match.
+            user_id: User ID to search within.
+            threshold: Override similarity threshold.
+            quality_score: Audio quality score for adaptive thresholds.
+            
+        Returns:
+            VoiceMatchResult combining both approaches.
+        """
+        effective_threshold = threshold or self.threshold
+        
+        # Get centroid-based match
+        centroid_result = await self.match_with_centroids(
+            embedding, user_id, threshold, quality_score
+        )
+        
+        # Get individual embedding match
+        individual_result = await self.match(embedding, user_id, threshold)
+        
+        # Combine results
+        if centroid_result.is_match and individual_result.is_match:
+            # Both agree - use the one with higher confidence
+            if centroid_result.speaker_id == individual_result.speaker_id:
+                # Same speaker - high confidence
+                combined_confidence = max(centroid_result.confidence, individual_result.confidence)
+                logger.info(f"[HYBRID] Both methods agree on speaker, conf={combined_confidence:.4f}")
+                return VoiceMatchResult(
+                    is_match=True,
+                    speaker_id=centroid_result.speaker_id,
+                    confidence=combined_confidence,
+                )
+            else:
+                # Different speakers - use centroid (more stable)
+                logger.warning(f"[HYBRID] Methods disagree! Centroid={centroid_result.speaker_id[:8]}..., "
+                             f"Individual={individual_result.speaker_id[:8]}... Using centroid.")
+                return centroid_result
+        
+        elif centroid_result.is_match:
+            return centroid_result
+        elif individual_result.is_match:
+            return individual_result
+        else:
+            # Neither matched
+            return VoiceMatchResult(
+                is_match=False,
+                speaker_id=None,
+                confidence=max(centroid_result.confidence, individual_result.confidence),
+            )
+    
+    def _get_adaptive_threshold(
+        self,
+        quality_score: float,
+        base_threshold: float,
+    ) -> float:
+        """
+        Compute adaptive threshold based on audio quality.
+        
+        - High quality audio (>0.7): Lower threshold (more permissive)
+        - Low quality audio (<0.4): Higher threshold (more strict to avoid false positives)
+        - Medium quality: Use base threshold
+        
+        Args:
+            quality_score: Audio quality score (0-1).
+            base_threshold: Base matching threshold.
+            
+        Returns:
+            Adjusted threshold.
+        """
+        if quality_score > 0.7:
+            # High quality - be more permissive
+            adjustment = -0.05
+        elif quality_score > 0.5:
+            # Medium-high quality - slight adjustment
+            adjustment = -0.02
+        elif quality_score > 0.4:
+            # Medium quality - no adjustment
+            adjustment = 0.0
+        elif quality_score > 0.25:
+            # Low quality - be more strict
+            adjustment = 0.05
+        else:
+            # Very low quality - very strict
+            adjustment = 0.10
+        
+        adjusted = base_threshold + adjustment
+        
+        # Clamp to reasonable range
+        return float(np.clip(adjusted, 0.30, 0.70))
+    
+    async def update_speaker_centroid(
+        self,
+        speaker_id: str,
+    ) -> Optional[np.ndarray]:
+        """
+        Recompute and update the centroid for a speaker.
+        
+        This should be called after adding new embeddings to keep
+        the centroid up to date.
+        
+        Args:
+            speaker_id: Speaker to update centroid for.
+            
+        Returns:
+            New centroid or None if speaker has no embeddings.
+        """
+        embeddings = await self.get_speaker_embeddings(speaker_id)
+        
+        if len(embeddings) == 0:
+            return None
+        
+        # Compute centroid (mean of all embeddings)
+        centroid = np.mean(embeddings, axis=0)
+        
+        # Normalize to unit length for cosine similarity
+        norm = np.linalg.norm(centroid)
+        if norm > 0:
+            centroid = centroid / norm
+        
+        logger.info(f"[CENTROID] Updated centroid for speaker {speaker_id[:8]}... "
+                   f"from {len(embeddings)} embeddings")
+        
+        return centroid
     
     async def find_similar_speakers(
         self,

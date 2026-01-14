@@ -1,4 +1,11 @@
-"""WebSocket streaming endpoint for real-time voice identification."""
+"""WebSocket streaming endpoint for real-time voice identification.
+
+Enhanced with:
+- Audio preprocessing (noise reduction, normalization)
+- Voice activity detection (VAD)
+- Quality-based adaptive thresholds
+- Centroid-based speaker matching
+"""
 
 import json
 import asyncio
@@ -13,7 +20,7 @@ from app.services.supabase_client import get_supabase_client
 from app.core.diarization import DiarizationPipeline
 from app.core.embeddings import EmbeddingExtractor
 from app.core.voice_matcher import VoiceMatcher
-from app.core.audio_utils import load_audio_from_bytes
+from app.core.audio_utils import load_audio_from_bytes, load_and_preprocess, ProcessedAudio
 from app.services.speaker_service import SpeakerService
 from app.core.transcription import TranscriptionService
 
@@ -21,16 +28,33 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def compute_quality_score(duration: float, min_duration: float = 0.5) -> float:
-    """Compute quality score based on segment duration."""
+def compute_quality_score(duration: float, min_duration: float = 0.5, audio: Optional[np.ndarray] = None) -> float:
+    """
+    Compute quality score based on segment duration and audio characteristics.
+    
+    Enhanced version that considers:
+    - Segment duration
+    - Audio RMS energy (if provided)
+    """
+    # Base score from duration
     if duration < min_duration:
-        return 0.3
+        duration_score = 0.3
     elif duration < 1.0:
-        return 0.5 + (duration - min_duration) * 0.4
+        duration_score = 0.5 + (duration - min_duration) * 0.4
     elif duration < 3.0:
-        return 0.7 + (duration - 1.0) * 0.1
+        duration_score = 0.7 + (duration - 1.0) * 0.1
     else:
-        return min(1.0, 0.9 + (duration - 3.0) * 0.02)
+        duration_score = min(1.0, 0.9 + (duration - 3.0) * 0.02)
+    
+    # Add audio energy score if audio is provided
+    if audio is not None and len(audio) > 0:
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        # Energy score: 0.05 = 0.5, 0.2 = 1.0
+        energy_score = min(1.0, max(0.3, (rms - 0.02) / 0.18 * 0.7 + 0.3))
+        # Combine scores
+        return duration_score * 0.7 + energy_score * 0.3
+    
+    return duration_score
 
 
 class StreamingSession:
@@ -118,16 +142,59 @@ class StreamingSession:
     
     async def process_chunk(self, audio_bytes: bytes) -> list[dict]:
         """
-        Process an incoming audio chunk.
+        Process an incoming audio chunk with preprocessing.
+        
+        Enhanced pipeline:
+        1. Load and preprocess audio (noise reduction, normalization)
+        2. Check quality and speech ratio
+        3. Buffer and process in windows
         
         Returns list of identified speaker segments.
         """
         logger.info(f"[CHUNK] Processing {len(audio_bytes)} bytes...")
         
-        # Load and add to buffer
+        # Load audio with optional preprocessing
         try:
-            audio, sr = load_audio_from_bytes(audio_bytes, target_sr=self.settings.sample_rate)
-            logger.info(f"[CHUNK] Loaded audio: {len(audio)} samples, {len(audio)/sr:.2f}s, sr={sr}")
+            enable_preprocessing = getattr(self.settings, 'enable_preprocessing', False)
+            enable_vad = getattr(self.settings, 'enable_vad', False)
+            min_quality = getattr(self.settings, 'min_quality_score', 0.3)
+            
+            if enable_preprocessing:
+                try:
+                    # Use enhanced preprocessing pipeline
+                    processed = load_and_preprocess(
+                        audio_bytes,
+                        target_sr=self.settings.sample_rate,
+                        enable_preprocessing=True,
+                        enable_vad=enable_vad,
+                        min_quality_score=min_quality,
+                    )
+                    
+                    audio = processed.audio
+                    sr = processed.sample_rate
+                    self._last_chunk_quality = processed.quality_score
+                    self._last_chunk_speech_ratio = processed.speech_ratio
+                    
+                    logger.info(f"[CHUNK] Preprocessed audio: {len(audio)} samples, {processed.duration:.2f}s, "
+                               f"quality={processed.quality_score:.2f}, speech_ratio={processed.speech_ratio:.2f}")
+                    
+                    # Skip very low quality audio
+                    if not processed.is_acceptable:
+                        logger.warning(f"[CHUNK] Audio quality too low ({processed.quality_score:.2f}), skipping")
+                        return []
+                except Exception as preproc_err:
+                    logger.warning(f"[CHUNK] Preprocessing failed, using simple loading: {preproc_err}")
+                    audio, sr = load_audio_from_bytes(audio_bytes, target_sr=self.settings.sample_rate)
+                    self._last_chunk_quality = 0.5
+                    self._last_chunk_speech_ratio = 1.0
+                    logger.info(f"[CHUNK] Loaded audio (fallback): {len(audio)} samples, {len(audio)/sr:.2f}s")
+            else:
+                # Simple loading without preprocessing
+                audio, sr = load_audio_from_bytes(audio_bytes, target_sr=self.settings.sample_rate)
+                self._last_chunk_quality = 0.5
+                self._last_chunk_speech_ratio = 1.0
+                logger.info(f"[CHUNK] Loaded audio: {len(audio)} samples, {len(audio)/sr:.2f}s, sr={sr}")
+                
         except Exception as e:
             logger.warning(f"[CHUNK] Could not load audio: {e}")
             return []  # Skip this chunk gracefully
@@ -151,8 +218,11 @@ class StreamingSession:
             window_samples = int(self.window_duration * sr)
             window_audio = full_audio[:window_samples]
             
-            # Process window
-            window_results = await self._process_window(window_audio, sr)
+            # Process window with quality info
+            window_results = await self._process_window(
+                window_audio, sr,
+                quality_score=getattr(self, '_last_chunk_quality', 0.5),
+            )
             results.extend(window_results)
             
             # Slide buffer (keep overlap)
@@ -203,9 +273,24 @@ class StreamingSession:
         
         return best_label
     
-    async def _process_window(self, audio: np.ndarray, sr: int) -> list[dict]:
-        """Process a single audio window for speaker identification."""
+    async def _process_window(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        quality_score: float = 0.5,
+    ) -> list[dict]:
+        """
+        Process a single audio window for speaker identification.
+        
+        Enhanced with:
+        - Adaptive thresholds based on audio quality
+        - Centroid-based matching (optional)
+        """
         results = []
+        
+        # Advanced matching options (can be enabled in config)
+        use_centroid = getattr(self.settings, 'use_centroid_matching', False)
+        use_adaptive = getattr(self.settings, 'use_adaptive_threshold', False)
         
         try:
             # Run diarization
@@ -241,8 +326,12 @@ class StreamingSession:
                 # Get embedding - pass sample rate for proper resampling
                 embedding = self.embedding_extractor.extract(segment_audio, sr)
                 
-                # Compute quality score
-                quality_score = compute_quality_score(duration, self.settings.min_segment_duration)
+                # Compute quality score with audio characteristics
+                segment_quality = compute_quality_score(
+                    duration,
+                    self.settings.min_segment_duration,
+                    audio=segment_audio,
+                )
                 
                 # Use diarization label
                 diar_label = segment.label
@@ -322,10 +411,26 @@ class StreamingSession:
                         try:
                             logger.info(f"[STREAM] New label '{diar_label}' ({duration:.2f}s) - checking DB for matches...")
                             
-                            match_result = await self.voice_matcher.match(
-                                embedding=embedding,
-                                user_id=self.user_id,
-                            )
+                            # Use centroid matching if enabled, otherwise simple matching
+                            if use_centroid:
+                                try:
+                                    match_result = await self.voice_matcher.match_with_centroids(
+                                        embedding=embedding,
+                                        user_id=self.user_id,
+                                        quality_score=quality_score if use_adaptive else None,
+                                        use_adaptive_threshold=use_adaptive,
+                                    )
+                                except Exception as centroid_err:
+                                    logger.warning(f"[STREAM] Centroid matching failed, using simple: {centroid_err}")
+                                    match_result = await self.voice_matcher.match(
+                                        embedding=embedding,
+                                        user_id=self.user_id,
+                                    )
+                            else:
+                                match_result = await self.voice_matcher.match(
+                                    embedding=embedding,
+                                    user_id=self.user_id,
+                                )
                             
                             logger.info(f"[STREAM] Match result: is_match={match_result.is_match}, confidence={match_result.confidence:.4f}")
                             
@@ -371,15 +476,19 @@ class StreamingSession:
                         logger.error(f"[TRANSCRIBE] Error: {e}")
                 
                 if not is_temp_speaker:
-                    # Store embedding with quality score (non-blocking, skip on error)
-                    try:
-                        await self.voice_matcher.store_embedding(
-                            speaker_id=speaker_id,
-                            embedding=embedding,
-                            quality_score=quality_score,
-                        )
-                    except Exception as e:
-                        print(f"Store embedding error: {e}")
+                    # Only store embedding if quality is high enough
+                    store_threshold = getattr(self.settings, 'store_quality_threshold', 0.6)
+                    if segment_quality >= store_threshold:
+                        try:
+                            await self.voice_matcher.store_embedding(
+                                speaker_id=speaker_id,
+                                embedding=embedding,
+                                quality_score=segment_quality,
+                            )
+                        except Exception as e:
+                            print(f"Store embedding error: {e}")
+                    else:
+                        logger.debug(f"[STREAM] Skipping embedding storage (quality={segment_quality:.2f} < {store_threshold})")
                     
                     # Create segment record with transcript (non-blocking, skip on error)
                     if self.conversation_id:
@@ -389,7 +498,7 @@ class StreamingSession:
                                 "speaker_id": speaker_id,
                                 "start_ms": int(segment.start * 1000),
                                 "end_ms": int(segment.end * 1000),
-                                "confidence": quality_score,
+                                "confidence": segment_quality,
                                 "transcript": transcript,
                             }).execute()
                         except Exception as e:
@@ -413,7 +522,7 @@ class StreamingSession:
                     "is_new_speaker": is_new,
                     "start_ms": int(segment.start * 1000),
                     "end_ms": int(segment.end * 1000),
-                    "confidence": quality_score,
+                    "confidence": segment_quality,
                     "transcript": transcript,
                 })
             except Exception as e:

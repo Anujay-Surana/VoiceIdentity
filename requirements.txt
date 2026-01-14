@@ -18,9 +18,19 @@ soundfile==0.12.1
 numpy==1.26.4
 openai-whisper==20231117  # Transcription (no PyAV dependency)
 
+# Audio Preprocessing & Quality
+noisereduce==3.0.2        # Noise reduction
+pyloudnorm==0.1.1         # Audio normalization (EBU R128)
+scipy>=1.10.0             # Signal processing
+
 # Utilities
 python-dotenv==1.0.1
 pydantic==2.6.1
 pydantic-settings==2.1.0
 httpx>=0.23,<0.25
 huggingface_hub==0.21.4
+
+# Benchmarking
+pyannote.metrics>=3.2.0   # Standard diarization metrics
+pandas>=2.0.0             # Data analysis
+click>=8.0.0              # CLI framework

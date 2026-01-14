@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 
 function ConfigPanel({ config, setConfig }) {
   const [isOpen, setIsOpen] = useState(false)
@@ -11,102 +12,196 @@ function ConfigPanel({ config, setConfig }) {
 
   const isConfigured = config.apiKey && config.userId
 
+  const modal = isOpen ? createPortal(
+    <div 
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 9999,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      {/* Backdrop */}
+      <div 
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+        }}
+        onClick={() => setIsOpen(false)}
+      />
+      
+      {/* Modal */}
+      <div 
+        style={{
+          position: 'relative',
+          width: '100%',
+          maxWidth: '400px',
+          margin: '16px',
+          backgroundColor: '#0a0a0a',
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          borderRadius: '16px',
+          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+        }}
+      >
+        <div style={{ padding: '24px', borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+          <h3 style={{ fontSize: '18px', fontWeight: 600, color: 'white', margin: 0 }}>API Configuration</h3>
+          <p style={{ fontSize: '14px', color: 'rgba(255, 255, 255, 0.4)', marginTop: '4px' }}>Connect to your Voice Identity backend</p>
+        </div>
+
+        <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div>
+            <label style={{ display: 'block', fontSize: '14px', color: 'rgba(255, 255, 255, 0.6)', marginBottom: '8px' }}>
+              API URL
+            </label>
+            <input
+              type="text"
+              value={tempConfig.apiUrl}
+              onChange={(e) => setTempConfig({ ...tempConfig, apiUrl: e.target.value })}
+              placeholder="https://api.example.com"
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                backgroundColor: 'rgba(255, 255, 255, 0.05)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                borderRadius: '12px',
+                color: 'white',
+                fontSize: '14px',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: '14px', color: 'rgba(255, 255, 255, 0.6)', marginBottom: '8px' }}>
+              API Key
+            </label>
+            <input
+              type="password"
+              value={tempConfig.apiKey}
+              onChange={(e) => setTempConfig({ ...tempConfig, apiKey: e.target.value })}
+              placeholder="Enter your API key"
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                backgroundColor: 'rgba(255, 255, 255, 0.05)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                borderRadius: '12px',
+                color: 'white',
+                fontSize: '14px',
+                fontFamily: 'monospace',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: '14px', color: 'rgba(255, 255, 255, 0.6)', marginBottom: '8px' }}>
+              User ID
+            </label>
+            <input
+              type="text"
+              value={tempConfig.userId}
+              onChange={(e) => setTempConfig({ ...tempConfig, userId: e.target.value })}
+              placeholder="your-user-id"
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                backgroundColor: 'rgba(255, 255, 255, 0.05)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                borderRadius: '12px',
+                color: 'white',
+                fontSize: '14px',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+        </div>
+
+        <div style={{ 
+          padding: '24px', 
+          borderTop: '1px solid rgba(255, 255, 255, 0.05)', 
+          display: 'flex', 
+          gap: '12px' 
+        }}>
+          <button
+            onClick={() => setIsOpen(false)}
+            style={{
+              flex: 1,
+              padding: '12px 16px',
+              backgroundColor: 'transparent',
+              border: 'none',
+              borderRadius: '12px',
+              color: 'rgba(255, 255, 255, 0.6)',
+              fontSize: '14px',
+              fontWeight: 500,
+              cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            style={{
+              flex: 1,
+              padding: '12px 16px',
+              backgroundColor: 'white',
+              border: 'none',
+              borderRadius: '12px',
+              color: 'black',
+              fontSize: '14px',
+              fontWeight: 500,
+              cursor: 'pointer',
+            }}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  ) : null
+
   return (
-    <div className="relative">
+    <>
       <button
         onClick={() => {
           setTempConfig(config)
           setIsOpen(!isOpen)
         }}
-        className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
+        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all border ${
           isConfigured
-            ? 'bg-green-600/20 text-green-400 border border-green-500/30 hover:bg-green-600/30'
-            : 'bg-amber-600/20 text-amber-400 border border-amber-500/30 hover:bg-amber-600/30'
+            ? 'bg-white/5 border-white/10 text-white/80 hover:bg-white/10'
+            : 'bg-white text-black border-white hover:bg-white/90'
         }`}
       >
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-        </svg>
-        <span className="text-sm font-medium">
-          {isConfigured ? 'Connected' : 'Configure'}
-        </span>
+        {isConfigured ? (
+          <>
+            <span className="w-1.5 h-1.5 bg-green-400 rounded-full" />
+            Connected
+          </>
+        ) : (
+          <>
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+            Connect
+          </>
+        )}
       </button>
-
-      {isOpen && (
-        <>
-          {/* Backdrop */}
-          <div 
-            className="fixed inset-0 z-40"
-            onClick={() => setIsOpen(false)}
-          />
-          
-          {/* Panel */}
-          <div className="absolute right-0 top-full mt-2 w-96 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-50 animate-fade-in">
-            <div className="p-4 border-b border-gray-800">
-              <h3 className="font-semibold text-lg">API Configuration</h3>
-              <p className="text-sm text-gray-500 mt-1">Connect to your Voice Identity backend</p>
-            </div>
-
-            <div className="p-4 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">
-                  API URL
-                </label>
-                <input
-                  type="text"
-                  value={tempConfig.apiUrl}
-                  onChange={(e) => setTempConfig({ ...tempConfig, apiUrl: e.target.value })}
-                  placeholder="http://localhost:8000"
-                  className="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 transition-colors"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">
-                  API Key
-                </label>
-                <input
-                  type="password"
-                  value={tempConfig.apiKey}
-                  onChange={(e) => setTempConfig({ ...tempConfig, apiKey: e.target.value })}
-                  placeholder="Enter your API key"
-                  className="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 transition-colors font-mono text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">
-                  User ID
-                </label>
-                <input
-                  type="text"
-                  value={tempConfig.userId}
-                  onChange={(e) => setTempConfig({ ...tempConfig, userId: e.target.value })}
-                  placeholder="e.g., user-123"
-                  className="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-100 placeholder-gray-500 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 transition-colors"
-                />
-              </div>
-            </div>
-
-            <div className="p-4 border-t border-gray-800 flex gap-3">
-              <button
-                onClick={() => setIsOpen(false)}
-                className="flex-1 px-4 py-2.5 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-750 transition-colors font-medium"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                className="flex-1 px-4 py-2.5 bg-violet-600 text-white rounded-lg hover:bg-violet-500 transition-colors font-medium"
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
+      {modal}
+    </>
   )
 }
 

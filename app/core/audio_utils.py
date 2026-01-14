@@ -1,18 +1,56 @@
-"""Audio preprocessing utilities."""
+"""Audio preprocessing utilities with quality scoring.
+
+This module provides:
+- Audio loading from various formats
+- Audio preprocessing (noise reduction, normalization)
+- Quality scoring for embedding selection
+- Voice activity detection integration
+"""
 
 import io
 import tempfile
 import os
 import subprocess
+import logging
 import numpy as np
 import librosa
 import soundfile as sf
+from typing import Optional, Tuple
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
-def load_audio_from_bytes(audio_bytes: bytes, target_sr: int = 16000) -> tuple[np.ndarray, int]:
+@dataclass
+class ProcessedAudio:
+    """Container for processed audio with metadata."""
+    audio: np.ndarray          # Preprocessed audio samples
+    sample_rate: int           # Sample rate
+    duration: float            # Duration in seconds
+    quality_score: float       # Quality score (0-1)
+    speech_ratio: float        # Ratio of speech to total duration
+    snr_db: float              # Estimated SNR in dB
+    is_acceptable: bool        # Whether quality is good enough to process
+    
+    @property
+    def is_high_quality(self) -> bool:
+        """Check if quality is high enough to store embedding."""
+        return self.quality_score >= 0.6
+
+
+def load_audio_from_bytes(
+    audio_bytes: bytes,
+    target_sr: int = 16000,
+    apply_preprocessing: bool = False,
+) -> tuple[np.ndarray, int]:
     """
     Load audio from bytes and resample to target sample rate.
     Supports WAV, MP3, WebM/Opus, and other formats via ffmpeg.
+    
+    Args:
+        audio_bytes: Raw audio bytes.
+        target_sr: Target sample rate.
+        apply_preprocessing: Whether to apply noise reduction/normalization.
     
     Returns:
         tuple: (audio_array, sample_rate)
@@ -37,7 +75,91 @@ def load_audio_from_bytes(audio_bytes: bytes, target_sr: int = 16000) -> tuple[n
         audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
         sr = target_sr
     
+    # Apply preprocessing if requested
+    if apply_preprocessing:
+        from app.core.audio_preprocessing import get_preprocessor
+        preprocessor = get_preprocessor()
+        audio = preprocessor.preprocess(audio, sr)
+    
     return audio.astype(np.float32), sr
+
+
+def load_and_preprocess(
+    audio_bytes: bytes,
+    target_sr: int = 16000,
+    enable_preprocessing: bool = True,
+    enable_vad: bool = True,
+    min_quality_score: float = 0.3,
+) -> ProcessedAudio:
+    """
+    Load audio with full preprocessing and quality analysis.
+    
+    This is the recommended method for processing audio for speaker
+    identification, as it applies all quality improvements and provides
+    detailed quality metrics.
+    
+    Args:
+        audio_bytes: Raw audio bytes.
+        target_sr: Target sample rate.
+        enable_preprocessing: Whether to apply noise reduction/normalization.
+        enable_vad: Whether to compute speech ratio using VAD.
+        min_quality_score: Minimum quality score to accept.
+        
+    Returns:
+        ProcessedAudio object with preprocessed audio and quality metrics.
+    """
+    # Load raw audio
+    try:
+        audio, sr = load_audio_from_bytes(audio_bytes, target_sr, apply_preprocessing=False)
+    except Exception as e:
+        logger.error(f"[AUDIO] Failed to load audio: {e}")
+        return ProcessedAudio(
+            audio=np.array([], dtype=np.float32),
+            sample_rate=target_sr,
+            duration=0.0,
+            quality_score=0.0,
+            speech_ratio=0.0,
+            snr_db=0.0,
+            is_acceptable=False,
+        )
+    
+    duration = len(audio) / sr
+    
+    # Apply preprocessing
+    if enable_preprocessing:
+        from app.core.audio_preprocessing import get_preprocessor
+        preprocessor = get_preprocessor()
+        audio = preprocessor.preprocess(audio, sr)
+    
+    # Compute speech ratio using VAD
+    speech_ratio = 1.0
+    if enable_vad:
+        try:
+            from app.core.vad import get_vad
+            vad = get_vad()
+            speech_ratio = vad.get_speech_ratio(audio, sr)
+        except Exception as e:
+            logger.warning(f"[AUDIO] VAD failed: {e}")
+            speech_ratio = 1.0  # Assume all speech
+    
+    # Compute quality score
+    from app.core.audio_preprocessing import compute_quality_score
+    quality = compute_quality_score(audio, sr, speech_ratio)
+    
+    is_acceptable = quality.overall_score >= min_quality_score
+    
+    logger.debug(f"[AUDIO] Processed: duration={duration:.2f}s, quality={quality.overall_score:.2f}, "
+                f"speech_ratio={speech_ratio:.2f}, snr={quality.snr_db:.1f}dB, acceptable={is_acceptable}")
+    
+    return ProcessedAudio(
+        audio=audio,
+        sample_rate=sr,
+        duration=duration,
+        quality_score=quality.overall_score,
+        speech_ratio=speech_ratio,
+        snr_db=quality.snr_db,
+        is_acceptable=is_acceptable,
+    )
 
 
 def _load_with_ffmpeg(audio_bytes: bytes, target_sr: int = 16000) -> tuple[np.ndarray, int]:

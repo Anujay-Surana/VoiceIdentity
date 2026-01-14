@@ -1,5 +1,6 @@
 """Voice embedding extraction using SpeechBrain ECAPA-TDNN."""
 
+import os
 import torch
 import torchaudio
 import numpy as np
@@ -15,6 +16,21 @@ logger = logging.getLogger(__name__)
 TARGET_SAMPLE_RATE = 16000
 MIN_AUDIO_DURATION = 0.5  # Minimum 0.5 seconds for embedding
 OPTIMAL_AUDIO_DURATION = 2.0  # Optimal 2+ seconds for best quality
+
+
+def _get_default_savedir() -> str:
+    """Get the default save directory for models, works in Docker and locally."""
+    # Docker path (used in production)
+    docker_path = "/app/pretrained_models/spkrec-ecapa-voxceleb"
+    
+    # Check if we're in Docker (the /app directory exists and is writable)
+    if os.path.exists("/app") and os.access("/app", os.W_OK):
+        return docker_path
+    
+    # Local development: use ~/.cache/speechbrain
+    home = os.path.expanduser("~")
+    local_path = os.path.join(home, ".cache", "speechbrain", "spkrec-ecapa-voxceleb")
+    return local_path
 
 
 class EmbeddingExtractor:
@@ -38,20 +54,26 @@ class EmbeddingExtractor:
     def __init__(
         self,
         device: Optional[str] = None,
-        savedir: str = "/app/pretrained_models/spkrec-ecapa-voxceleb",
+        savedir: Optional[str] = None,
     ):
         """
         Initialize the embedding extractor.
         
         Args:
             device: Device to run on ('cuda', 'cpu', or None for auto-detect)
-            savedir: Directory to cache the downloaded model
+            savedir: Directory to cache the downloaded model (auto-detected if None)
         """
         # Auto-detect device
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
+        
+        # Auto-detect save directory
+        if savedir is None:
+            savedir = _get_default_savedir()
+        
+        logger.info(f"[EMBEDDING] Loading model to {savedir}")
         
         # Load pre-trained model
         self.model = EncoderClassifier.from_hparams(

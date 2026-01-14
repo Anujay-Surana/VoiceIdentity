@@ -1,28 +1,34 @@
-import { useMemo } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 
 function WaveformVisualizer({ level = 0 }) {
+  const [tick, setTick] = useState(0)
+  
+  useEffect(() => {
+    const interval = setInterval(() => setTick(t => t + 1), 50)
+    return () => clearInterval(interval)
+  }, [])
+
   const bars = useMemo(() => {
-    const count = 32
+    const count = 40
     return Array.from({ length: count }, (_, i) => {
-      // Create a wave pattern that responds to audio level
       const centerDistance = Math.abs(i - count / 2) / (count / 2)
-      const baseHeight = 0.2 + (1 - centerDistance) * 0.3
-      const variation = Math.sin(i * 0.5 + Date.now() / 200) * 0.2
-      const levelBoost = level * (1 - centerDistance * 0.5)
+      const baseHeight = 0.15 + (1 - centerDistance) * 0.25
+      const variation = Math.sin(i * 0.4 + tick * 0.2) * 0.15
+      const levelBoost = level * (1 - centerDistance * 0.6)
       
-      return Math.min(1, Math.max(0.1, baseHeight + variation + levelBoost))
+      return Math.min(1, Math.max(0.08, baseHeight + variation + levelBoost))
     })
-  }, [level])
+  }, [level, tick])
 
   return (
-    <div className="flex items-center justify-center gap-1 h-16">
+    <div className="flex items-center justify-center gap-[3px] h-16">
       {bars.map((height, i) => (
         <div
           key={i}
-          className="waveform-bar w-1.5 bg-gradient-to-t from-violet-600 to-fuchsia-500 rounded-full"
+          className="waveform-bar w-[3px] bg-white rounded-full"
           style={{
             height: `${height * 100}%`,
-            opacity: 0.5 + height * 0.5,
+            opacity: 0.3 + height * 0.5,
           }}
         />
       ))}
