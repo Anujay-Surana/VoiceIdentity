@@ -1,9 +1,12 @@
 """Audio upload and processing endpoints."""
 
-from typing import Annotated
+from typing import Annotated, Optional
 from collections import defaultdict
 import numpy as np
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, status
+import io
+import base64
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, status, Query
+from fastapi.responses import Response
 
 from app.api.dependencies import (
     get_user_context,
@@ -16,7 +19,7 @@ from app.config import Settings
 from app.models.schemas import ProcessAudioResponse, ProcessedSegment
 from app.services.speaker_service import SpeakerService
 from app.services.storage_service import StorageService
-from app.core.audio_utils import load_audio_from_bytes
+from app.core.audio_utils import load_audio_from_bytes, load_and_preprocess
 from app.core.voice_matcher import VoiceMatcher
 
 router = APIRouter()
@@ -338,3 +341,211 @@ async def process_audio(
         total_speakers=unique_speakers,
         new_speakers=len(new_speaker_labels),
     )
+
+
+@router.post("/test-preprocessing")
+async def test_preprocessing(
+    file: Annotated[UploadFile, File(description="Audio file to test preprocessing")],
+    enable_preprocessing: bool = Query(True, description="Enable noise reduction and normalization"),
+    enable_vad: bool = Query(False, description="Enable voice activity detection"),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Test audio preprocessing pipeline.
+    
+    Returns detailed metrics about the audio before and after preprocessing,
+    along with the processed audio as base64 for playback.
+    
+    This endpoint is for testing/debugging the audio pipeline.
+    """
+    import soundfile as sf
+    
+    audio_bytes = await file.read()
+    
+    if len(audio_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty audio file",
+        )
+    
+    try:
+        # Load original audio
+        original_audio, original_sr = load_audio_from_bytes(audio_bytes, target_sr=settings.sample_rate)
+        
+        # Compute original metrics
+        original_rms = float(np.sqrt(np.mean(original_audio ** 2)))
+        original_peak = float(np.abs(original_audio).max())
+        original_duration = len(original_audio) / original_sr
+        
+        # Compute original spectral characteristics
+        original_silent_ratio = float(np.mean(np.abs(original_audio) < 0.01))
+        
+        result = {
+            "original": {
+                "duration_seconds": round(original_duration, 3),
+                "sample_rate": original_sr,
+                "samples": len(original_audio),
+                "rms_level": round(original_rms, 4),
+                "peak_level": round(original_peak, 4),
+                "silent_ratio": round(original_silent_ratio, 3),
+                "clipping_detected": original_peak >= 0.99,
+            },
+            "processed": None,
+            "processed_audio_base64": None,
+            "original_audio_base64": None,
+        }
+        
+        # Encode original audio for playback
+        original_buffer = io.BytesIO()
+        sf.write(original_buffer, original_audio, original_sr, format='WAV')
+        original_buffer.seek(0)
+        result["original_audio_base64"] = base64.b64encode(original_buffer.read()).decode('utf-8')
+        
+        if enable_preprocessing:
+            try:
+                # Run preprocessing pipeline
+                processed = load_and_preprocess(
+                    audio_bytes,
+                    target_sr=settings.sample_rate,
+                    enable_preprocessing=True,
+                    enable_vad=enable_vad,
+                    min_quality_score=0.0,  # Don't reject anything for testing
+                )
+                
+                processed_audio = processed.audio
+                processed_rms = float(np.sqrt(np.mean(processed_audio ** 2)))
+                processed_peak = float(np.abs(processed_audio).max())
+                processed_silent_ratio = float(np.mean(np.abs(processed_audio) < 0.01))
+                
+                result["processed"] = {
+                    "duration_seconds": round(processed.duration, 3),
+                    "sample_rate": processed.sample_rate,
+                    "samples": len(processed_audio),
+                    "rms_level": round(processed_rms, 4),
+                    "peak_level": round(processed_peak, 4),
+                    "silent_ratio": round(processed_silent_ratio, 3),
+                    "quality_score": round(processed.quality_score, 3),
+                    "speech_ratio": round(processed.speech_ratio, 3),
+                    "is_acceptable": processed.is_acceptable,
+                    "clipping_detected": processed_peak >= 0.99,
+                }
+                
+                # Compute improvement metrics
+                result["improvements"] = {
+                    "rms_change": round((processed_rms - original_rms) / max(original_rms, 0.001), 3),
+                    "noise_reduction": round(original_silent_ratio - processed_silent_ratio, 3) if enable_vad else None,
+                    "normalized": processed_peak > original_peak * 1.1 or processed_peak < original_peak * 0.9,
+                }
+                
+                # Encode processed audio for playback
+                processed_buffer = io.BytesIO()
+                sf.write(processed_buffer, processed_audio, processed.sample_rate, format='WAV')
+                processed_buffer.seek(0)
+                result["processed_audio_base64"] = base64.b64encode(processed_buffer.read()).decode('utf-8')
+                
+            except Exception as e:
+                result["preprocessing_error"] = str(e)
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to process audio: {str(e)}",
+        )
+
+
+@router.post("/test-embedding")
+async def test_embedding(
+    file: Annotated[UploadFile, File(description="Audio file to extract embedding from")],
+    user_ctx: Annotated[dict, Depends(get_user_context)],
+    supabase=Depends(get_supabase),
+    embedding_extractor=Depends(get_embedding_extractor),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """
+    Test voice embedding extraction and matching.
+    
+    Returns the embedding and top matches from the database without creating
+    any new speakers or storing the embedding.
+    """
+    user = user_ctx["user"]
+    user_id = user["id"]
+    
+    audio_bytes = await file.read()
+    
+    if len(audio_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty audio file",
+        )
+    
+    try:
+        # Load and optionally preprocess
+        try:
+            processed = load_and_preprocess(
+                audio_bytes,
+                target_sr=settings.sample_rate,
+                enable_preprocessing=True,
+                enable_vad=False,
+                min_quality_score=0.0,
+            )
+            audio = processed.audio
+            sr = processed.sample_rate
+            quality_score = processed.quality_score
+        except Exception:
+            audio, sr = load_audio_from_bytes(audio_bytes, target_sr=settings.sample_rate)
+            quality_score = 0.5
+        
+        # Extract embedding
+        embedding = embedding_extractor.extract(audio, sr)
+        
+        # Initialize voice matcher
+        voice_matcher = VoiceMatcher(
+            supabase=supabase,
+            embedding_extractor=embedding_extractor,
+            threshold=settings.voice_match_threshold,
+            merge_threshold=settings.voice_merge_threshold,
+        )
+        
+        # Get match candidates
+        match_result, candidates = await voice_matcher.match_with_candidates(
+            embedding=embedding,
+            user_id=user_id,
+        )
+        
+        # Get speaker names for candidates
+        candidate_info = []
+        for candidate in candidates[:10]:
+            try:
+                speaker_info = supabase.table("speakers").select("id, name").eq(
+                    "id", candidate["speaker_id"]
+                ).execute()
+                name = speaker_info.data[0].get("name") if speaker_info.data else None
+            except Exception:
+                name = None
+            
+            candidate_info.append({
+                "speaker_id": candidate["speaker_id"],
+                "speaker_name": name,
+                "similarity": round(candidate["similarity"], 4),
+            })
+        
+        return {
+            "duration_seconds": round(len(audio) / sr, 3),
+            "quality_score": round(quality_score, 3),
+            "embedding_dimensions": len(embedding),
+            "match_result": {
+                "is_match": match_result.is_match,
+                "speaker_id": match_result.speaker_id,
+                "confidence": round(match_result.confidence, 4) if match_result.confidence else None,
+            },
+            "top_candidates": candidate_info,
+            "threshold_used": settings.voice_match_threshold,
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to process audio: {str(e)}",
+        )

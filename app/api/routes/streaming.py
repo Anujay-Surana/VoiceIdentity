@@ -625,11 +625,30 @@ async def websocket_stream(
         transcription_service=transcription_service,
     )
     
+    # Track WebSocket state to avoid sending after close
+    ws_closed = False
+    
+    async def safe_send_json(data: dict) -> bool:
+        """Send JSON if WebSocket is still open. Returns False if closed."""
+        nonlocal ws_closed
+        if ws_closed:
+            return False
+        try:
+            await websocket.send_json(data)
+            return True
+        except RuntimeError as e:
+            if "close message has been sent" in str(e):
+                ws_closed = True
+                logger.info("[STREAM] WebSocket closed, stopping sends")
+                return False
+            raise
+    
     try:
         while True:
             message = await websocket.receive()
             
             if message["type"] == "websocket.disconnect":
+                ws_closed = True
                 break
             
             if "text" in message:
@@ -639,7 +658,7 @@ async def websocket_stream(
                 
                 if action == "start":
                     conversation_id = await session.start_conversation()
-                    await websocket.send_json({
+                    await safe_send_json({
                         "type": "conversation_started",
                         "conversation_id": conversation_id,
                     })
@@ -648,13 +667,13 @@ async def websocket_stream(
                     # Flush remaining audio
                     final_results = await session.flush()
                     if final_results:
-                        await websocket.send_json({
+                        await safe_send_json({
                             "type": "identification",
                             "segments": final_results,
                         })
                     
                     await session.end_conversation()
-                    await websocket.send_json({
+                    await safe_send_json({
                         "type": "conversation_ended",
                         "conversation_id": session.conversation_id,
                     })
@@ -669,14 +688,28 @@ async def websocket_stream(
                     logger.info(f"[STREAM] Processed chunk, got {len(results)} results")
                     
                     if results:
-                        await websocket.send_json({
+                        if not await safe_send_json({
                             "type": "identification",
                             "segments": results,
-                        })
+                        }):
+                            # WebSocket closed during processing, exit loop
+                            break
                 except Exception as e:
                     logger.error(f"[STREAM] Error processing chunk: {e}")
     
     except WebSocketDisconnect:
+        ws_closed = True
         # Clean up on disconnect
         await session.flush()
         await session.end_conversation()
+    except Exception as e:
+        logger.error(f"[STREAM] Unexpected error: {e}")
+        ws_closed = True
+    finally:
+        # Ensure cleanup happens
+        if not ws_closed:
+            try:
+                await session.flush()
+                await session.end_conversation()
+            except Exception:
+                pass

@@ -469,15 +469,30 @@ class VoiceMatcher:
         Returns:
             Centroid embedding or None if speaker has no embeddings
         """
-        result = self.supabase.rpc(
-            "get_speaker_centroid",
-            {"target_speaker_id": speaker_id}
-        ).execute()
-        
-        if result.data is None:
+        try:
+            result = self.supabase.rpc(
+                "get_speaker_centroid",
+                {"target_speaker_id": speaker_id}
+            ).execute()
+            
+            if result.data is None:
+                return None
+            
+            # Handle various return types from the RPC
+            centroid = np.array(result.data)
+            
+            # Ensure we have a valid 1D array with expected embedding dimensions
+            if centroid.ndim == 0:
+                logger.warning(f"[CENTROID] Got 0-dimensional array for speaker {speaker_id[:8]}...")
+                return None
+            
+            if centroid.size == 0:
+                return None
+            
+            return centroid
+        except Exception as e:
+            logger.error(f"[CENTROID] Error getting centroid for speaker {speaker_id[:8]}...: {e}")
             return None
-        
-        return np.array(result.data)
     
     async def verify_speakers(
         self,
@@ -551,7 +566,7 @@ class VoiceMatcher:
             # Get centroid from database
             centroid = await self.get_speaker_centroid(speaker_id)
             
-            if centroid is None or len(centroid) == 0:
+            if centroid is None or centroid.size == 0:
                 continue
             
             # Compute similarity
